@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  UUID:
+    Description: UUID of stack items
+    Type: String
+  subnetID:
+    Description: subnetID
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-XXXXXXXXXXXXXXXXX
+  vpcEndpointStackName:
+    Description: subnetID
+    Type: String
+    Default: stack-Interface
+
+Resources:
+  MyECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      RoleName: !Sub "MyECSTaskRole-${UUID}"
+
+  taskdefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Essential: true
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.ap-northeast-1.amazonaws.com/fargate-private"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-create-group: true
+              awslogs-group: !Sub "/ecs/myEcsLogs-${UUID}"
+              awslogs-region: ap-northeast-1
+              awslogs-stream-prefix: fgtLog
+          Name: !Sub "myContainer-${UUID}"
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 80
+              Protocol: tcp
+      Cpu: '1024'
+      ExecutionRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/ecsTaskExecutionRole"
+      TaskRoleArn: !Ref MyECSTaskRole
+      Family: !Sub "taskDefinition-${UUID}"
+      Memory: '2048'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "MyCluster-${UUID}"
+    DependsOn: taskdefinition
+
+  LambdaServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InlinePolicy
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/taskDefinition-${UUID}"
+              - Effect: Allow
+                Action: cloudformation:CreateStack
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${vpcEndpointStackName}/*"
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${vpcEndpointStackName}/*"
+              - Effect: Allow
+                Action: cloudformation:GetTemplate
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${vpcEndpointStackName}/*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: '*'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      RoleName: !Sub "LambdaServiceRole-${UUID}"
+    DependsOn: ECSCluster
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "MyLambda-${UUID}"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaServiceRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      Environment:
+        Variables:
+          privateSubnet: !Sub "${subnetID}"
+          clusterArn: !GetAtt ECSCluster.Arn
+          taskDefinitionArn: !Sub "arn:aws:ecs:ap-northeast-1:${AWS::AccountId}:task-definition/taskDefinition-${UUID}"
+          cfnArn: !GetAtt CFnServiceRole.Arn
+      Code:
+        ZipFile: |
+          # coding: utf-8
+          import json
+          import os
+          import time
+
+          import boto3
+
+          ecs_client = boto3.client("ecs",region_name="ap-northeast-1")
+          cfn_client = boto3.client("cloudformation", region_name="ap-northeast-1")
+          vpcEndpointStackName='stack-Interface'
+          vpcEndpointStackTemplateURL = "https://XXXXXXXXXXXXXXXXX/interfaceEndpoint.yaml"
+
+          def checkEdnpointAlive(client, stackName):
+              res = False
+              try:
+                  response = client.get_template(
+                  StackName=stackName
+                  )
+
+                  if "VPCEndpoint" in response["TemplateBody"]:
+                      res = True
+                  return res
+              #no stack case
+              except:
+                  pass
+
+
+          def updatewait(client, stackName):
+              attempts = 120
+              delay = 30
+              time.sleep(delay)
+              try:
+                  for i in range(attempts):
+                      res = client.describe_stacks(
+                          StackName=stackName
+                          )
+                      stack = res["Stacks"][0]
+                      if (stack["StackStatus"] is 'CREATE_COMPLETE'):
+                          break
+                      else:
+                          pass
+              #no stack case
+              except:
+                  pass
+
+          def createStackFromTemplate(client, stackName, templateURL, roleArn):
+              client.create_stack(
+              StackName=stackName,
+              TemplateURL=templateURL,
+              Capabilities=["CAPABILITY_NAMED_IAM"],
+              RoleARN=roleArn
+              )
+
+          def lambda_handler(event, context):
+              # preparing interface endpoint
+              updatewait(cfn_client, vpcEndpointStackName)
+              if not(checkEdnpointAlive(cfn_client, vpcEndpointStackName)):
+                  createStackFromTemplate(cfn_client, vpcEndpointStackName, vpcEndpointStackTemplateURL, os.environ["cfnArn"])
+                  updatewait(cfn_client, vpcEndpointStackName)
+              
+              # ecsExecute
+              ecs_client.run_task(
+                  cluster=os.environ["clusterArn"],
+                  launchType="FARGATE",
+                  networkConfiguration={
+                      "awsvpcConfiguration": {
+                          "subnets": [os.environ["privateSubnet"]],
+                          "assignPublicIp": "DISABLED",
+                      }
+                  },
+                  taskDefinition=os.environ["taskDefinitionArn"]
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Hello from Lambda!')
+              }
+
+
+  CFnServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InlinePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:*
+                Resource: 
+                  - "*"
+      RoleName: !Sub "CFnServiceRole-${UUID}"

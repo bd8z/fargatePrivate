@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  #VPCID
+  fargateVPC:
+    Description: "VPC ID"
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-XXXXXXXXXXXXXXXXX
+
+  #InterfaceSubnet1
+  fargateSubnetId1:
+    Description: "Interface Subnet 1st"
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-XXXXXXXXXXXXXXXXX
+
+Resources:
+  VpcRouteTalbe:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref fargateVPC
+
+  VpcRouteTalbeAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref VpcRouteTalbe
+      SubnetId: !Ref fargateSubnetId1
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: "Security Group for VPC Endpoints"
+      SecurityGroupEgress: 
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress: 
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref fargateVPC
+
+  LogEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: true
+      SecurityGroupIds: 
+        - !Ref EndpointSecurityGroup
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      SubnetIds: 
+        - !Ref fargateSubnetId1
+      VpcEndpointType: Interface
+      VpcId: !GetAtt EndpointSecurityGroup.VpcId
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: true
+      SecurityGroupIds: 
+        - !Ref EndpointSecurityGroup
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      SubnetIds: 
+        - !Ref fargateSubnetId1
+      VpcEndpointType: Interface
+      VpcId: !GetAtt EndpointSecurityGroup.VpcId
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: true
+      SecurityGroupIds: 
+        - !Ref EndpointSecurityGroup
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      SubnetIds: 
+        - !Ref fargateSubnetId1
+      VpcEndpointType: Interface
+      VpcId: !GetAtt EndpointSecurityGroup.VpcId
+  SMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: true
+      SecurityGroupIds: 
+        - !Ref EndpointSecurityGroup
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      SubnetIds: 
+        - !Ref fargateSubnetId1
+      VpcEndpointType: Interface
+      VpcId: !GetAtt EndpointSecurityGroup.VpcId
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds: [!Ref VpcRouteTalbe]
+      
+      VpcEndpointType: Gateway
+      VpcId: !GetAtt EndpointSecurityGroup.VpcId
